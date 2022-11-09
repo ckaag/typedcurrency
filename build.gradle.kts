@@ -6,6 +6,8 @@ plugins {
     kotlin("jvm") version "1.6.20"
     id("org.springframework.boot") version "2.7.5"
     id("io.spring.dependency-management") version "1.0.15.RELEASE"
+    `maven-publish`
+    `java-library`
     java
 }
 
@@ -16,6 +18,10 @@ repositories {
     mavenCentral()
 }
 
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
 
 configurations {
     testCompileOnly {
@@ -85,7 +91,7 @@ class TypedCurrencyGenerationPlugin : Plugin<Project> {
                 val generatedClasses = extension.currencyCodes.get().flatMap { currencyCode ->
                     extension.scales.get().flatMap { scale ->
                         listOf(false, true).flatMap { gross ->
-                            //TODO: currently we cannot set a default value for Jackson null fields, so we can give up here
+                            // currently we cannot set a default value for Jackson null fields, so we can give up here
                             (if (extension.includeNullable.get()) listOf(
                                 false,
                                 true
@@ -108,7 +114,7 @@ class TypedCurrencyGenerationPlugin : Plugin<Project> {
 
     data class Field(var name: String, var type: String, var constant: String? = null) {
         fun formatAsJavaCodeLine(): String {
-            return "${if(constant == null) "private" else "public"} ${if (constant != null) "static " else ""}final $type $name${if (constant != null) " = $constant" else ""};"
+            return "${if (constant == null) "private" else "public"} ${if (constant != null) "static " else ""}final $type $name${if (constant != null) " = $constant" else ""};"
         }
 
         fun toJavaCode() = "$type $name"
@@ -157,7 +163,7 @@ class TypedCurrencyGenerationPlugin : Plugin<Project> {
         file.writeText(content)
     }
 
-    fun generateType(nullable: Boolean, scale: Int, currencyCode: String, gross: Boolean): String {
+    private fun generateType(nullable: Boolean, scale: Int, currencyCode: String, gross: Boolean): String {
         val name = getTypeName(currencyCode, scale, gross, nullable)
         val mirroredTypeName = getTypeName(
             currencyCode,
@@ -184,8 +190,55 @@ class TypedCurrencyGenerationPlugin : Plugin<Project> {
                     mirroredTypeName,
                     listOf(Field("vat", "VATSource")),
                     if (gross) "return new $mirroredTypeName(value.divide(vat.getVatValueMultiplier().add(BigDecimal.ONE), scale, RoundingMode.HALF_UP));" else "return new $mirroredTypeName(value.multiply(vat.getVatValueMultiplier().add(BigDecimal.ONE)));"
-                )
-            //TODO: add substract, add, modulo, divide, multiply for same type or general
+                ),
+                MethodImplementations(
+                    "add",
+                    name,
+                    listOf(Field("other", name)),
+                    "return new $name(toBigDecimal().add(other.toBigDecimal()));"
+                ),
+                MethodImplementations(
+                    "subtract",
+                    name,
+                    listOf(Field("other", name)),
+                    "return new $name(toBigDecimal().subtract(other.toBigDecimal()));"
+                ),
+                MethodImplementations(
+                    "multiply",
+                    name,
+                    listOf(Field("other", "BigDecimal")),
+                    "return new $name(toBigDecimal().multiply(other));"
+                ),
+                MethodImplementations(
+                    "multiply",
+                    name,
+                    listOf(Field("other", "long")),
+                    "return new $name(toBigDecimal().multiply(BigDecimal.valueOf(other)));"
+                ),
+                MethodImplementations(
+                    "multiply",
+                    name,
+                    listOf(Field("other", "double")),
+                    "return new $name(toBigDecimal().multiply(BigDecimal.valueOf(other)));"
+                ),
+                MethodImplementations(
+                    "divide",
+                    name,
+                    listOf(Field("other", "BigDecimal")),
+                    "return new $name(toBigDecimal().multiply(other));"
+                ),
+                MethodImplementations(
+                    "modulo",
+                    name,
+                    listOf(Field("other", "BigDecimal")),
+                    "return new $name(toBigDecimal().remainder(other));"
+                ),
+                MethodImplementations(
+                    "modulo",
+                    name,
+                    listOf(Field("other", name)),
+                    "return new $name(toBigDecimal().remainder(other.toBigDecimal()));"
+                ),
             ),
             listOf(
                 "public $name(BigDecimal bd) {this.value = bd.setScale(scale, java.math.RoundingMode.HALF_UP);}",
@@ -215,18 +268,18 @@ class TypedCurrencyGenerationPlugin : Plugin<Project> {
         fun toNonImplementation(): MethodImplementations = MethodImplementations(name, returnValue)
     }
 
-    fun generateInterface(name: String = "VATSource", methods: List<Method> = listOf(Method())) {
+    private fun generateInterface(name: String = "VATSource", methods: List<Method> = listOf(Method())) {
         generateJavaFile(name, "public interface", "", listOf(), methods.map { it.toNonImplementation() }, listOf())
     }
 
-    fun generateConfig(generatedClasses: List<String>) {
+    private fun generateConfig(generatedClasses: List<String>) {
         println("Generated following classes:")
         generatedClasses.forEach {
             println(" - $it")
         }
+//TODO: reuse same class to minimize metaspace
 
-
-       val prefix = """package com.github.ckaag.typedcurrency;
+        val prefix = """package com.github.ckaag.typedcurrency;
 
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
@@ -262,7 +315,7 @@ public class TypedCurrencyConfig {
         } + suffix)
     }
 
-    private fun buildSerializerDeserializerForType(simpleClassName: String)  = """
+    private fun buildSerializerDeserializerForType(simpleClassName: String) = """
         module.addSerializer($simpleClassName.class, new StdSerializer<>($simpleClassName.class) {
             @Override
             public void serialize($simpleClassName value, JsonGenerator gen, SerializerProvider provider) throws IOException {
@@ -308,5 +361,8 @@ public class TypedCurrencyConfig {
 apply<TypedCurrencyGenerationPlugin>()
 
 tasks.compileJava {
+    dependsOn("genTypedCurrency")
+}
+tasks.testClasses {
     dependsOn("genTypedCurrency")
 }
